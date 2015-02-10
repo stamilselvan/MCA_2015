@@ -1,6 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
+#include <lock.h>
+#include <cuda_runtime.h>
+
 
 const unsigned int s_table[] = {
 7, 12, 17, 22,  7, 12, 17, 22,  7, 12, 17, 22,  7, 12, 17, 22 ,
@@ -57,12 +61,42 @@ const int digests_6letters[] = {
 0x097d100d , 0x0ce4bbf5 , 0x5cdee3ad , 0xb7e9e971 ,
 0x9ad1e705 , 0x1821006d , 0xd270efde , 0x6e22f41f 
 };
-			
-
-#define MAX_DG (10)
 
 
-void md5(char* message,int length, unsigned int* digest) 		// Simplified for max. 8 letters
+#define SIX_LETTER
+
+#ifdef THREE_LETTER
+	#define MAX_DG (10)
+	#define no_of_char 3
+	#define NO_BLOCKS_X 8	
+	#define NO_BLOCKS_Y 9	
+	#define NO_THREADS_X 16  
+	#define NO_THREADS_Y 16
+	#define THREAD_LIMIT 17576 // 26*26*26
+#endif
+
+#ifdef FOUR_LETTER
+	#define MAX_DG (10)
+	#define no_of_char 4
+	#define NO_BLOCKS_X 32
+	#define NO_BLOCKS_Y 14
+	#define NO_THREADS_X 32
+	#define NO_THREADS_Y 32
+	#define THREAD_LIMIT 456976 // 26*26*26*26
+#endif
+
+#ifdef SIX_LETTER
+	#define MAX_DG (4)
+	#define no_of_char 6
+	#define NO_BLOCKS_X 512
+	#define NO_BLOCKS_Y 920
+	#define NO_THREADS_X 32
+	#define NO_THREADS_Y 32
+	#define THREAD_LIMIT 481890304
+#endif
+
+// Simplified for max. 8 letters
+__device__ void md5(char* message,int length, unsigned int* digest, int *dev_s_table, int *dev_k_table)
 {
    unsigned int a0 = 0x67452301;
 	unsigned int b0 = 0xefcdab89; 
@@ -73,7 +107,35 @@ void md5(char* message,int length, unsigned int* digest) 		// Simplified for max
 	unsigned int C=c0;
 	unsigned int D=d0;
 	unsigned int M[16]  = {0,0,0,0, 0,0,0,0, 0,0,0,0 , 0,0,0,0};
-	memcpy(M,message,length);
+	//memcpy(M,message,length);
+
+	/* memcpy is not available in GPU
+	 * considering little endianness 
+	 * for memcpy
+	 */
+	#ifdef FOUR_LETTER
+		  M[0] = M[0] | ((int) message[3] << 24)
+					| ((int) message[2] << 16)
+					| ((int) message[1] << 8)
+					| ((int) message[0]);
+	#endif
+
+	#ifdef THREE_LETTER
+		  M[0] = M[0] | ((int) message[2] << 16)
+					| ((int) message[1] << 8)
+					| ((int) message[0]);
+	#endif
+
+	#ifdef SIX_LETTER
+			M[0] = M[0] | ((int) message[3] << 24)
+					| ((int) message[2] << 16)
+					| ((int) message[1] << 8)
+					| ((int) message[0]);
+
+			M[1] = M[1] | ((int) message[5] << 8)
+						| ((int) message[4]);
+	#endif
+	
 	((char*)M)[length]=0x80;
 	M[14]=length*8;
 	for (int i=0;i<64;i++) 
@@ -91,8 +153,8 @@ void md5(char* message,int length, unsigned int* digest) 		// Simplified for max
 		if (i < 32) { X = G; g=(5*i+1) & 15; }
 		if (i < 16) { X = F; g=i; }
 
-		unsigned int tmp = A+X+k_table[i]+M[g];
-		B = B + ((tmp << s_table[i]) | ((tmp & 0xffffffff) >> (32-s_table[i])));
+		unsigned int tmp = A+X+dev_k_table[i]+M[g];
+		B = B + ((tmp << dev_s_table[i]) | ((tmp & 0xffffffff) >> (32-dev_s_table[i])));
 		A = tempD;
 	}
    digest[0] = a0 + A;
@@ -102,36 +164,155 @@ void md5(char* message,int length, unsigned int* digest) 		// Simplified for max
 }
 
 
-int check_password(char *passwd, const int *digests, int num_digests)
+__global__ void check_password(char *dev_result, const int *dev_digest, 
+	int *dev_s_table, int *dev_k_table, int *dev_pw_count)
 {
-	int dg[4];
-	md5(passwd,strlen(passwd),dg);
-	for (int i=0;i< num_digests; i++)
-	{
-		if (( dg[0] == digests[i*4] ) && ( dg[1] == digests[i*4+1] ) && ( dg[2] == digests[i*4+2] ) && ( dg[3] == digests[i*4+3] )) {
-			return i;
+	unsigned int dg[4];
+	char passwd[no_of_char +1];
+	int num_digests = 10;
+
+	int blockId = blockIdx.x + blockIdx.y * gridDim.x;
+	int index = blockId * (blockDim.x * blockDim.y) 
+		+ (threadIdx.y * blockDim.x) + threadIdx.x;
+	
+	#ifdef THREE_LETTER
+		passwd[2] = 'a' + ((index / 26) / 26) % 26;
+		passwd[1] = 'a' + (index / 26) % 26;
+		passwd[0] = 'a' + index % 26;
+		passwd[3] = 0;
+	#endif
+
+	#ifdef FOUR_LETTER
+		passwd[3] = 'a' + (((index / 26) / 26) /26) % 26;
+		passwd[2] = 'a' + ((index / 26) / 26) % 26;
+		passwd[1] = 'a' + (index / 26) % 26;
+		passwd[0] = 'a' + index % 26;
+		passwd[4] = 0;
+	#endif
+
+	#ifdef SIX_LETTER
+		passwd[4] = 'a' + ((((index / 26) / 26) /26) / 26) % 26;
+		passwd[3] = 'a' + (((index / 26) / 26) /26) % 26;
+		passwd[2] = 'a' + ((index / 26) / 26) % 26;
+		passwd[1] = 'a' + (index / 26) % 26;
+		passwd[0] = 'a' + index % 26;
+		passwd[5] = 0;
+	#endif
+
+	// md5(passwd,strlen(passwd),dg);
+	if(index < THREAD_LIMIT){
+		md5(passwd, no_of_char, dg, dev_s_table, dev_k_table);
+
+		bool leaveLoop = false;
+		int locks;
+
+		for (int i=0;i< num_digests; i++)
+		{
+			if (( dg[0] == dev_digest[i*4] ) && ( dg[1] == dev_digest[i*4+1] ) 
+				&& ( dg[2] == dev_digest[i*4+2] ) && ( dg[3] == dev_digest[i*4+3] )) {
+
+			    while (!leaveLoop) {
+					if (atomicExch(&locks, 1u) == 0u) {
+						//critical section
+						
+						/*for(int g=1; g<=10; g++){
+							if(dev_result[g*4 -1] != ' '){
+								break;
+							}
+						}*/
+						dev_result[ dev_pw_count[0] ] = passwd[0];
+						dev_result[ dev_pw_count[0] +1] = passwd[1];
+						dev_result[ dev_pw_count[0] +2] = passwd[2];
+
+						#ifdef THREE_LETTER
+							dev_result[ dev_pw_count[0] +3] = ' ';
+							dev_pw_count[0] += 4;
+						#endif
+
+						#ifdef FOUR_LETTER
+							dev_result[ dev_pw_count[0] +3] = passwd[3];
+							dev_result[ dev_pw_count[0] +4] = ' ';
+							dev_pw_count[0] += 5;
+						#endif
+
+						#ifdef SIX_LETTER
+							dev_result[ dev_pw_count[0] +3] = passwd[3];
+							dev_result[ dev_pw_count[0] +4] = passwd[4];
+							dev_result[ dev_pw_count[0] +5] = passwd[5];
+							dev_result[ dev_pw_count[0] +6] = ' ';
+							dev_pw_count[0] += 7;
+						#endif
+						
+			    		leaveLoop = true;
+			    		atomicExch(&(locks),0u);
+			        }
+			    }
+
+			}
 		}
 	}
-	return -1;
+	
 }
 
 int main(int argc, char** args) 
 {
-	char passwd[5];
-	for (int i=0;i<26;i++) 
-		for (int j=0;j<26;j++) 
-			for (int k=0;k<26;k++) 
-				for (int l=0;l<26;l++) 
-				{
-					passwd[0]='a'+l;
-					passwd[1]='a'+k;
-					passwd[2]='a'+j;
-					passwd[3]='a'+i;
-					passwd[4]=0;
-					if (check_password(passwd,digests_4letters,MAX_DG) != -1)
-					{
-						printf("%s\n",passwd);
-					};
-				}
-}
+	char *result, *dev_result, **passwords;
+	int *dev_digest, *dev_s_table, *dev_k_table, *dev_pw_count;
+	const int *temp_digest;
+	int res_size, digest_size, s_table_size, k_table_size, dig_res_size, pw_count[1];
 
+	res_size = sizeof(char) * MAX_DG * (no_of_char + 1);
+	digest_size = sizeof(const int) * MAX_DG * 4;
+	s_table_size = sizeof(unsigned int) * 64;
+	k_table_size = sizeof(unsigned int) * 64;
+
+	result = (char *) malloc(res_size);
+	cudaMalloc((void**)&dev_result, res_size);
+	cudaMalloc((void**)&dev_digest, digest_size);
+	cudaMalloc((void**)&dev_s_table, s_table_size);
+	cudaMalloc((void**)&dev_k_table, k_table_size);
+	cudaMalloc((void**)&dev_pw_count, sizeof(int));
+
+	/*int *dev_dig_res, *dig_res;
+	dig_res_size = sizeof(int) * 4;
+	dig_res = (int *) malloc(dig_res_size);
+	cudaMalloc((void**)&dev_dig_res, dig_res_size);*/
+
+	assert(result != NULL);
+	assert(dev_result != NULL);
+
+	dim3  dimBlock(NO_THREADS_X, NO_THREADS_Y);	/* # threads per Block */
+	dim3 dimGrid(NO_BLOCKS_X, NO_BLOCKS_Y);		/* # Blocks per Grid */
+
+	#ifdef THREE_LETTER
+		temp_digest = digests_3letters;
+	#endif
+
+	#ifdef FOUR_LETTER
+		temp_digest = digests_4letters;
+	#endif
+
+	#ifdef SIX_LETTER
+		temp_digest = digests_6letters;
+	#endif
+
+	pw_count[0] = 0;
+	cudaMemcpy(dev_digest, temp_digest, digest_size, cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_s_table, s_table, s_table_size, cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_k_table, k_table, k_table_size, cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_pw_count, pw_count, sizeof(int), cudaMemcpyHostToDevice);
+
+	check_password<<< dimGrid, dimBlock >>>(dev_result, dev_digest, dev_s_table, dev_k_table, dev_pw_count);
+
+	cudaMemcpy(result, dev_result, res_size, cudaMemcpyDeviceToHost);
+	// cudaMemcpy(dig_res, dev_dig_res, dig_res_size, cudaMemcpyDeviceToHost);
+
+	printf("String is: %s, size: %d\n", result, strlen(result));
+
+	free(result);
+	cudaFree(dev_digest);
+	cudaFree(dev_result);
+
+	return 0;
+
+}
