@@ -63,7 +63,7 @@ const int digests_6letters[] = {
 };
 
 
-#define THREE_LETTER
+#define FOUR_LETTER
 
 #ifdef THREE_LETTER
 	#define MAX_DG (10)
@@ -98,10 +98,10 @@ const int digests_6letters[] = {
 // Simplified for max. 8 letters "__forceinline__"
 __forceinline__  __device__ void md5(char* message,int length, unsigned int* digest, int *dev_s_table, int *dev_k_table)
 {
-   unsigned int a0 = 0x67452301;
+	unsigned int a0 = 0x67452301;
 	unsigned int b0 = 0xefcdab89; 
-   unsigned int c0 = 0x98badcfe; 
-   unsigned int d0 = 0x10325476; 
+	unsigned int c0 = 0x98badcfe; 
+	unsigned int d0 = 0x10325476; 
 	unsigned int A=a0;
 	unsigned int B=b0;
 	unsigned int C=c0;
@@ -133,7 +133,8 @@ __forceinline__  __device__ void md5(char* message,int length, unsigned int* dig
 	#endif
 	
 	((char*)M)[length]=0x80;
-	M[14]=length*8;
+	//M[14]=length * 8;
+	M[14]=length << 3;
 
 	#pragma unroll
 	for (int i=0;i<64;i++) 
