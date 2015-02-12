@@ -272,11 +272,6 @@ int main(int argc, char** args)
 	cudaMalloc((void**)&dev_k_table, k_table_size);
 	cudaMalloc((void**)&dev_pw_count, sizeof(int));
 
-	/*int *dev_dig_res, *dig_res;
-	dig_res_size = sizeof(int) * 4;
-	dig_res = (int *) malloc(dig_res_size);
-	cudaMalloc((void**)&dev_dig_res, dig_res_size);*/
-
 	assert(result != NULL);
 	assert(dev_result != NULL);
 
@@ -304,7 +299,6 @@ int main(int argc, char** args)
 	check_password<<< dimGrid, dimBlock >>>(dev_result, dev_digest, dev_s_table, dev_k_table, dev_pw_count);
 
 	cudaMemcpy(result, dev_result, res_size, cudaMemcpyDeviceToHost);
-	// cudaMemcpy(dig_res, dev_dig_res, dig_res_size, cudaMemcpyDeviceToHost);
 
 	char delim[] = " ";
 	char* token;
